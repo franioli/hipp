@@ -74,6 +74,7 @@ def hv_plot_raster(image_file_name):
         flip_yaxis=True,
         colorbar=False,
         cmap="gray",
+        aspect="equal",  # use asix equal to avoid distortion of the image
     )
 
     return hv_image, subplot_width, subplot_height
