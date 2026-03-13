@@ -1,6 +1,8 @@
 import glob
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -59,6 +61,27 @@ def image_restitution(
     pixel_pitches = []
     qc_dataframes = []
 
+    # ← LOG: global processing record
+    if qc:
+        processing_log = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "parameters": {
+                "scanning_resolution_mm": scanning_resolution_mm,
+                "image_square_dim": image_square_dim,
+                "interpolation_order": interpolation_order,
+                "transform_coords": transform_coords,
+                "transform_image": transform_image,
+                "crop_image": crop_image,
+                "output_directory": str(output_directory),
+                "fiducial_coordinates_true_mm": (
+                    fiducial_coordinates_true_mm.tolist()
+                    if hasattr(fiducial_coordinates_true_mm, "tolist")
+                    else fiducial_coordinates_true_mm
+                ),
+            },
+            "images": [],
+        }
+
     # convert true coordinates to image reference system
     if fiducial_coordinates_true_mm is not None:
         fiducial_coordinates_true_mm = np.array(
@@ -87,25 +110,25 @@ def image_restitution(
             )
         )
 
-        # add prinicpal point to get true fiducial coordinates into image reference system
+        # ← LOG: capture detected state before any transform
+        pp_detected = principal_point.copy()
+        fid_detected = fiducial_coordinates.copy()
+
+        # add principal point to get true fiducial coordinates into image reference system
         if fiducial_coordinates_true_mm is not None:
             fiducial_coordinates_true = fiducial_coordinates_true_px + principal_point
 
         if qc and fiducial_coordinates_true_mm is not None:
-            # convert coordinates to camera reference system.
             fiducial_coordinates_mm, principal_point_mm = hipp.qc.convert_coordinates(
                 fiducial_coordinates,
                 principal_point,
                 scanning_resolution_mm=scanning_resolution_mm,
             )
-
             fiducial_coordinates_true_mm, _ = hipp.qc.convert_coordinates(
                 fiducial_coordinates_true,
                 principal_point,
                 scanning_resolution_mm=scanning_resolution_mm,
             )
-
-            # compute RMSE for positions before transform.
             rmse = hipp.qc.compute_coordinate_rmse(
                 fiducial_coordinates_mm, fiducial_coordinates_true_mm
             )
@@ -116,8 +139,6 @@ def image_restitution(
                 midside_coordinates_true_mm = fiducial_coordinates_true_mm[:4]
                 corner_coordinates_mm = fiducial_coordinates_mm[4:]
                 corner_coordinates_true_mm = fiducial_coordinates_true_mm[4:]
-
-                # compute angular offsets for intersection angles at principal point before transform.
                 diff = hipp.qc.compute_angle_diff(
                     midside_coordinates_mm, midside_coordinates_true_mm
                 )
@@ -126,8 +147,6 @@ def image_restitution(
                     corner_coordinates_mm, corner_coordinates_true_mm
                 )
                 corner_angle_diff_before_tform.append(diff)
-
-                # compute RMSE for distance between principal point and coordinates before transform.
                 rmse = hipp.qc.compute_coordinate_distance_diff_rmse(
                     midside_coordinates_mm,
                     midside_coordinates_true_mm,
@@ -139,7 +158,6 @@ def image_restitution(
             elif len(fiducial_coordinates_mm) == 4:
                 midside_coordinates_mm = fiducial_coordinates_mm[:4]
                 midside_coordinates_true_mm = fiducial_coordinates_true_mm[:4]
-
                 diff = hipp.qc.compute_angle_diff(
                     midside_coordinates_mm, midside_coordinates_true_mm
                 )
@@ -152,8 +170,22 @@ def image_restitution(
             image_file = df_detected[image_file_name_column_name].iloc[index]
             image_array = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
 
+        # ← LOG: initialise per-image entry
+        if qc:
+            image_log = {
+                "source_image": str(image_file)
+                if (transform_image or crop_image)
+                else None,
+                "output_image": None,
+                "principal_point_detected_px": pp_detected.tolist(),
+                "fiducials_detected_px": fid_detected.tolist(),
+                "affine_transform": None,
+                "principal_point_restituted_px": None,
+                "principal_point_crop_center_px": None,
+                "crop_bounds_px": None,
+            }
+
         if transform_image or transform_coords:
-            # remove nan values
             fid_coord_tmp = np.where(
                 ~np.isnan(fiducial_coordinates_true), fiducial_coordinates, np.nan
             )
@@ -167,7 +199,6 @@ def image_restitution(
                 [x for x in fid_coord_true_tmp if ~np.isnan(x).any()], dtype=float
             )
 
-            # ensure at least 3 points are available to compute transform
             if len(fid_coord_tmp) >= 3 and ~np.isnan(fid_coord_true_tmp).all():
                 tform = tf.AffineTransform()
                 tform.estimate(fid_coord_tmp, fid_coord_true_tmp)
@@ -183,8 +214,23 @@ def image_restitution(
                 )
                 pixel_pitches.append(pixel_pitch_tmp)
 
+                if qc:
+                    # ← LOG: affine parameters and restituted principal point
+                    image_log["affine_transform"] = {
+                        "matrix_3x3": tform.params.tolist(),
+                        "translation_px": list(tform.translation),
+                        "rotation_rad": float(tform.rotation),
+                        "scale": list(tform.scale),
+                        "shear_rad": float(tform.shear),
+                    }
+                    image_log["principal_point_restituted_px"] = (
+                        principal_point.tolist()
+                    )
+                    image_log["fiducials_restituted_px"] = (
+                        fiducial_coordinates_tform.tolist()
+                    )
+
                 if transform_image:
-                    # compute inverse transformation matrix
                     A = np.linalg.inv(tform.params)
                     image_array_transformed = tf.warp(
                         image_array,
@@ -195,7 +241,6 @@ def image_restitution(
                     image_array = (image_array_transformed * 255).astype(np.uint8)
 
                 if qc:
-                    # convert transformed coordinates to camera reference system.
                     fiducial_coordinates_tform_mm, principal_point_tform_mm = (
                         hipp.qc.convert_coordinates(
                             fiducial_coordinates_tform,
@@ -203,7 +248,6 @@ def image_restitution(
                             scanning_resolution_mm=scanning_resolution_mm,
                         )
                     )
-                    # compute RMSE for positions after transform.
                     rmse = hipp.qc.compute_coordinate_rmse(
                         fiducial_coordinates_tform_mm, fiducial_coordinates_true_mm
                     )
@@ -212,8 +256,6 @@ def image_restitution(
                     if len(fiducial_coordinates_tform_mm) == 8:
                         midside_coordinates_tform_mm = fiducial_coordinates_tform_mm[:4]
                         corner_coordinates_tform_mm = fiducial_coordinates_tform_mm[4:]
-
-                        # compute angular offsets for intersection angles at principal point after transform.
                         diff = hipp.qc.compute_angle_diff(
                             midside_coordinates_tform_mm, midside_coordinates_true_mm
                         )
@@ -222,8 +264,6 @@ def image_restitution(
                             corner_coordinates_tform_mm, corner_coordinates_true_mm
                         )
                         corner_angle_diff_after_tform.append(diff)
-
-                        # compute RMSE for distance between principal point and coordinates after transform.
                         rmse = hipp.qc.compute_coordinate_distance_diff_rmse(
                             midside_coordinates_tform_mm,
                             midside_coordinates_true_mm,
@@ -233,12 +273,10 @@ def image_restitution(
                         coordinates_pp_dist_rmse_after_tform.append(rmse)
                     elif len(fiducial_coordinates_tform_mm) == 4:
                         midside_coordinates_tform_mm = fiducial_coordinates_tform_mm[:4]
-
                         diff = hipp.qc.compute_angle_diff(
                             midside_coordinates_tform_mm, midside_coordinates_true_mm
                         )
                         midside_angle_diff_after_tform.append(diff)
-
                         rmse = hipp.qc.compute_coordinate_distance_diff_rmse(
                             midside_coordinates_tform_mm,
                             midside_coordinates_true_mm,
@@ -249,6 +287,19 @@ def image_restitution(
 
         if crop_image:
             principal_point = np.array([int(round(x)) for x in principal_point])
+
+            # ← LOG: crop geometry (mirrors crop_about_point logic)
+            if qc:
+                half = int(round(image_square_dim / 2))
+                pp_x, pp_y = int(principal_point[0]), int(principal_point[1])
+                image_log["principal_point_crop_center_px"] = [pp_x, pp_y]
+                image_log["crop_bounds_px"] = {
+                    "x_left": pp_x - half,
+                    "x_right": pp_x + half,
+                    "y_top": pp_y - half,
+                    "y_bottom": pp_y + half,
+                }
+
             image_array = hipp.image.crop_about_point(
                 image_array,
                 principal_point[::-1],  # requires y,x order
@@ -265,6 +316,17 @@ def image_restitution(
             cv2.imwrite(out, image_array)
 
     if qc:
+        # ← LOG: record output path and append
+        if transform_image or crop_image:
+            image_log["output_image"] = out
+        processing_log["images"].append(image_log)
+
+        # ← LOG: save JSON alongside outputs
+        log_path = os.path.join(output_directory, "restitution_log.json")
+        with open(log_path, "w") as f:
+            json.dump(processing_log, f, indent=2)
+        print(f"Processing log saved to {log_path}")
+
         qc_dataframes = []
 
         qc_dataframes.append(
