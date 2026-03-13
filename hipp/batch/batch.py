@@ -1,10 +1,11 @@
-import cv2
 import glob
-import numpy as np
 import os
 import sys
-import pandas as pd
 from pathlib import Path
+
+import cv2
+import numpy as np
+import pandas as pd
 from skimage import transform as tf
 
 import hipp.core
@@ -382,7 +383,7 @@ def iter_detect_fiducials(
         slices = hipp.core.slice_image_frame(image_array, windows)
 
         # Detect fiducial in each window
-        matches, _ = hipp.core.detect_fiducials(slices, template_array, windows)
+        matches, qs = hipp.core.detect_fiducials(slices, template_array, windows)
 
         if midside_fiducials:
             labels = ["midside_left", "midside_top", "midside_right", "midside_bottom"]
@@ -400,6 +401,9 @@ def iter_detect_fiducials(
 
         quality_score_labels = [sub + "_score" for sub in labels]
 
+        template_array = cv2.imread(template_file, cv2.IMREAD_GRAYSCALE)
+        distance_from_loc = template_array.shape[0]  # = 2 × distance_around_fiducial
+
         subpixel_fiducial_locations, subpixel_quality_scores = (
             hipp.core.detect_subpixel_fiducial_coordinates(
                 image_file,
@@ -407,6 +411,7 @@ def iter_detect_fiducials(
                 matches,
                 template_high_res_zoomed_file,
                 labels=labels,
+                distance_from_loc=distance_from_loc,
                 qc=qc,
             )
         )
