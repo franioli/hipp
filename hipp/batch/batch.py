@@ -59,7 +59,7 @@ def image_restitution(
     qc_dataframes = []
 
     # convert true coordinates to image reference system
-    if fiducial_coordinates_true_mm:
+    if fiducial_coordinates_true_mm is not None:
         fiducial_coordinates_true_mm = np.array(
             fiducial_coordinates_true_mm, dtype=float
         )
@@ -87,10 +87,10 @@ def image_restitution(
         )
 
         # add prinicpal point to get true fiducial coordinates into image reference system
-        if fiducial_coordinates_true_mm:
+        if fiducial_coordinates_true_mm is not None:
             fiducial_coordinates_true = fiducial_coordinates_true_px + principal_point
 
-        if qc and fiducial_coordinates_true_mm:
+        if qc and fiducial_coordinates_true_mm is not None:
             # convert coordinates to camera reference system.
             fiducial_coordinates_mm, principal_point_mm = hipp.qc.convert_coordinates(
                 fiducial_coordinates,
