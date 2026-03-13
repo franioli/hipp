@@ -226,10 +226,10 @@ def create_fiducial_template(
 
     fiducial = (df.x[0], df.y[0])
 
-    x_L = int(fiducial[0] - distance_around_fiducial)
-    x_R = int(fiducial[0] + distance_around_fiducial)
-    y_T = int(fiducial[1] - distance_around_fiducial)
-    y_B = int(fiducial[1] + distance_around_fiducial)
+    x_L = round(fiducial[0] - distance_around_fiducial)
+    x_R = round(fiducial[0] + distance_around_fiducial)
+    y_T = round(fiducial[1] - distance_around_fiducial)
+    y_B = round(fiducial[1] + distance_around_fiducial)
     cropped = image_array[y_T:y_B, x_L:x_R]
 
     out = os.path.join(output_directory, output_file_name)
