@@ -17,6 +17,66 @@ import hipp.plot
 import hipp.qc
 
 
+def compute_safe_image_square_dim(
+    df: pd.DataFrame,
+    image_file_column: str = "fileName",
+    principal_point_x_column: str = "principal_point_x",
+    principal_point_y_column: str = "principal_point_y",
+) -> tuple[int, list[int]]:
+    """Compute safe square crop dimensions for a set of images.
+
+    For each image this computes the largest square (same half-distance in x and y)
+    that can be centered on the detected principal point without going out of image bounds.
+    Returns the minimum safe square dimension across all images and the list of per-image sizes.
+
+    Args:
+        df: DataFrame containing at least the image file path and principal point columns.
+        image_file_column: Name of the column with the image file path.
+        principal_point_x_column: Name of the principal point X column (pixel coordinate).
+        principal_point_y_column: Name of the principal point Y column (pixel coordinate).
+
+    Returns:
+        A tuple (min_safe_dim, per_image_safe_dims) where:
+        - min_safe_dim is the smallest safe square dimension (int) that fits every image.
+        - per_image_safe_dims is a list of ints with the safe square dimension per image.
+
+    Raises:
+        FileNotFoundError: if an image path does not exist.
+        IOError: if an image cannot be read.
+        ValueError: if no valid safe dimensions could be computed.
+    """
+    safe_dims: list[int] = []
+
+    for _, row in df.iterrows():
+        img_path = Path(row[image_file_column])
+        if not img_path.exists():
+            raise FileNotFoundError(f"Image not found: {img_path}")
+        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise OSError(f"Failed to read image: {img_path}")
+
+        h, w = img.shape
+        pp_y = float(row[principal_point_y_column])
+        pp_x = float(row[principal_point_x_column])
+
+        max_half = min(pp_y, h - pp_y, pp_x, w - pp_x)
+        if max_half <= 0:
+            # no valid square can be centered here; treat as zero (will be filtered below)
+            safe_dim = 0
+        else:
+            safe_dim = int(max_half) * 2
+
+        safe_dims.append(safe_dim)
+
+    # Filter out non-positive results and validate
+    valid_dims = [d for d in safe_dims if d > 0]
+    if not valid_dims:
+        raise ValueError("No valid safe image square dimensions computed.")
+
+    min_safe_dim = min(valid_dims)
+    return min_safe_dim, safe_dims
+
+
 def image_restitution(
     df_detected,
     fiducial_coordinates_true_mm=None,
