@@ -682,11 +682,13 @@ def detect_subpixel_fiducial_coordinates(
             qc=qc,
         )
 
+        template_hr = cv2.imread(template_high_res_zoomed_file, cv2.IMREAD_GRAYSCALE)
+        half_h = template_hr.shape[0] // 2
+        half_w = template_hr.shape[1] // 2
         y, x = (
-            (match_location_high_res[0] + int(distance_from_loc / 2)) / factor,
-            (match_location_high_res[1] + int(distance_from_loc / 2)) / factor,
+            (match_location_high_res[0] + half_h) / factor,
+            (match_location_high_res[1] + half_w) / factor,
         )
-
         subpixel_fiducial_location = y + match_location[0], x + match_location[1]
 
         subpixel_fiducial_locations.append(subpixel_fiducial_location)
