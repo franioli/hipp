@@ -29,6 +29,10 @@ def compute_safe_image_square_dim(
     that can be centered on the detected principal point without going out of image bounds.
     Returns the minimum safe square dimension across all images and the list of per-image sizes.
 
+    Images with a missing (NaN) principal point are skipped and get a safe_dim of 0.
+    A warning is printed for each such image; if ALL images are skipped, a ValueError
+    is raised because no usable crop dimension can be determined.
+
     Args:
         df: DataFrame containing at least the image file path and principal point columns.
         image_file_column: Name of the column with the image file path.
@@ -37,8 +41,10 @@ def compute_safe_image_square_dim(
 
     Returns:
         A tuple (min_safe_dim, per_image_safe_dims) where:
-        - min_safe_dim is the smallest safe square dimension (int) that fits every image.
-        - per_image_safe_dims is a list of ints with the safe square dimension per image.
+        - min_safe_dim is the smallest safe square dimension (int) that fits every image
+          that has a valid principal point.
+        - per_image_safe_dims is a list of ints with the safe square dimension per image
+          (0 for images with a missing or out-of-bounds principal point).
 
     Raises:
         FileNotFoundError: if an image path does not exist.
@@ -49,6 +55,8 @@ def compute_safe_image_square_dim(
 
     for _, row in df.iterrows():
         img_path = Path(row[image_file_column])
+        img_name = img_path.name
+
         if not img_path.exists():
             raise FileNotFoundError(f"Image not found: {img_path}")
         img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
@@ -56,22 +64,44 @@ def compute_safe_image_square_dim(
             raise OSError(f"Failed to read image: {img_path}")
 
         h, w = img.shape
-        pp_y = float(row[principal_point_y_column])
-        pp_x = float(row[principal_point_x_column])
+        pp_y = row[principal_point_y_column]
+        pp_x = row[principal_point_x_column]
+
+        # Missing principal point — skip gracefully
+        if pd.isna(pp_y) or pd.isna(pp_x):
+            print(
+                f"  Warning: {img_name} — principal point is NaN, skipping (safe_dim=0)"
+            )
+            safe_dims.append(0)
+            continue
+
+        pp_y, pp_x = float(pp_y), float(pp_x)
+
+        # Principal point outside image bounds
+        if pp_x <= 0 or pp_x >= w or pp_y <= 0 or pp_y >= h:
+            print(
+                f"  Warning: {img_name} — principal point ({pp_x:.1f}, {pp_y:.1f}) "
+                f"is outside image bounds ({w}×{h}), skipping (safe_dim=0)"
+            )
+            safe_dims.append(0)
+            continue
 
         max_half = min(pp_y, h - pp_y, pp_x, w - pp_x)
-        if max_half <= 0:
-            # no valid square can be centered here; treat as zero (will be filtered below)
-            safe_dim = 0
-        else:
-            safe_dim = int(max_half) * 2
+        safe_dims.append(int(max_half) * 2 if max_half > 0 else 0)
 
-        safe_dims.append(safe_dim)
-
-    # Filter out non-positive results and validate
     valid_dims = [d for d in safe_dims if d > 0]
     if not valid_dims:
-        raise ValueError("No valid safe image square dimensions computed.")
+        raise ValueError(
+            "No valid safe image square dimensions could be computed. "
+            "Check that principal points were detected correctly."
+        )
+
+    n_skipped = len(safe_dims) - len(valid_dims)
+    if n_skipped:
+        print(
+            f"\n  {n_skipped}/{len(safe_dims)} image(s) had no valid principal point "
+            f"and are excluded from the min_safe_dim calculation."
+        )
 
     min_safe_dim = min(valid_dims)
     return min_safe_dim, safe_dims
