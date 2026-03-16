@@ -89,12 +89,42 @@ def image_restitution(
     interpolation_order=3,
     output_directory="input_data/preprocessed_images/",
     qc=True,
+    keep_color=False,
 ):
     """
-    Computes affine transformation between detected coordinates and true coordinates true,
+    Computes affine transformation between detected coordinates and true coordinates,
     then transforms image array.
 
-    The order of interpolation.
+    Parameters
+    ----------
+    df_detected : pd.DataFrame
+        DataFrame with detected fiducial coordinates and image file names.
+    fiducial_coordinates_true_mm : list or array-like, optional
+        True fiducial coordinates in mm (x, y pairs).
+    image_file_name_column_name : str, default="fileName"
+        Column name containing image file paths.
+    scanning_resolution_mm : float, default=0.02
+        Scanning resolution in mm/px.
+    transform_coords : bool, default=True
+        Whether to transform coordinates using affine transformation.
+    transform_image : bool, default=True
+        Whether to transform the image array.
+    crop_image : bool, default=True
+        Whether to crop the image around the principal point.
+    image_square_dim : int, default=10800
+        Size of the square crop in pixels.
+    interpolation_order : int, default=3
+        Interpolation order for warp (0=nearest, 1=bilinear, 3=cubic).
+    output_directory : str, default="input_data/preprocessed_images/"
+        Output directory for transformed images.
+    qc : bool, default=True
+        Whether to generate quality control metrics and logs.
+    keep_color : bool, default=False
+        If False, convert images to grayscale. If True, keep all RGB channels.
+
+    Notes
+    -----
+    Interpolation orders:
     0: Nearest-neighbor
     1: Bi-linear
     2: Bi-quadratic
@@ -228,7 +258,10 @@ def image_restitution(
 
         if transform_image or crop_image:
             image_file = df_detected[image_file_name_column_name].iloc[index]
-            image_array = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
+            if keep_color:
+                image_array = cv2.imread(image_file, cv2.IMREAD_COLOR)
+            else:
+                image_array = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
 
         # ← LOG: initialise per-image entry
         if qc:
