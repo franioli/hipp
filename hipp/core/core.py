@@ -775,12 +775,16 @@ def iter_crop_image_from_file(
     print("Cropped images at:", output_directory)
 
 
-def iter_detect_fiducial_proxies(images, templates, buffer_distance=250, verbose=False):
+def iter_detect_fiducial_proxies(
+    images, templates, buffer_distance=250, max_workers=None, verbose=False
+):
     print("Detecting fiducial proxies...")
+
+    if max_workers is None:
+        max_workers = psutil.cpu_count(logical=True) - 1
+
     with tqdm(total=len(images)) as pbar:
-        pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=psutil.cpu_count(logical=True) - 1
-        )
+        pool = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
         future = {
             pool.submit(
                 hipp.core.detect_fiducial_proxies,

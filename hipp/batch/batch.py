@@ -660,6 +660,7 @@ def preprocess_with_fiducial_proxies(
     qc_plots=True,
     qc_plots_output_directory="qc/proxy_detection",
     EE_find_matching_template=False,
+    max_workers=None,
 ):
     """
     Detects fiducial marker proxies at midside left, top, right, and bottom positions.
@@ -801,7 +802,11 @@ def preprocess_with_fiducial_proxies(
         images = [img.as_posix() for img in images]
         templates = hipp.core.load_midside_fiducial_proxy_templates(template_directory)
         detected_df = hipp.core.iter_detect_fiducial_proxies(
-            images, templates, buffer_distance=buffer_distance, verbose=verbose
+            images,
+            templates,
+            buffer_distance=buffer_distance,
+            max_workers=max_workers,
+            verbose=verbose,
         )
 
         proxy_locations_df = hipp.core.nan_offset_fiducial_proxies(
@@ -876,10 +881,6 @@ def preprocess_with_fiducial_proxies(
             clahe_enhancement=clahe_enhancement,
             verbose=verbose,
         )
-        if np.isnan(np.nanmin(distances)):
-            print("""Could not compute distance between any fiducial proxies and principal point. 
-            Detection likely failed. Check your inputs.""")
-            sys.exit(1)
         if qc_plots:
             print("Plotting proxy detection QC plots at", qc_plots_output_directory)
             hipp.plot.iter_plot_proxies(
