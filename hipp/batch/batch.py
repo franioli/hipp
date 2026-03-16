@@ -811,8 +811,22 @@ def preprocess_with_fiducial_proxies(
             proxy_locations_df, verbose=verbose
         )
         principal_points, distances, intersection_angles = result
+        min_dist = np.nanmin(distances)
+        if np.isnan(min_dist):
+            print(
+                f"ERROR: Could not compute distance between any fiducial proxies. "
+                f"Detection likely failed for all images.\n"
+                f"Possible causes:\n"
+                f"  - The templates do not match the fiducial markers in the images.\n"
+                f"  - The threshold_px value is too strict (currently {threshold_px} px).\n"
+                f"  - The buffer_distance is incorrect.\n"
+                f"Check that your template images (L.tif, T.tif, R.tif, B.tif) look correct "
+                f"and that the fiducial markers are visible in the input images."
+            )
+            return None
+
         image_square_dim = (
-            int(round((np.nanmin(distances)) / 2)) * 2
+            int(round(min_dist / 2)) * 2
         )  # ensure half is non float for array index slicing
 
         new_image_square_dim = hipp.core.validate_square_dim(
