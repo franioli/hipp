@@ -71,13 +71,13 @@ def plot_images(
             ax.axis("off")
             pass
 
-    if isinstance(title, type(str())):
+    if isinstance(title, str):
         plt.suptitle(title, fontsize=15)
         plt.subplots_adjust(top=0.95)
 
     plt.tight_layout()
 
-    if isinstance(output_file_name, type(str())):
+    if isinstance(output_file_name, str):
         file_path, file_name, file_extension = hipp.io.split_file(output_file_name)
 
         p = pathlib.Path(file_path)
@@ -229,7 +229,7 @@ def iter_plot_detected_fiducials(
     marker_radius=30,
     draw_crosshair=True,
     save_full_res=True,
-    scale_factor=0.08,
+    scale_factor=0.1,
     grid_cols=4,
     figsize=(20, 20),
     save_grid=True,
@@ -268,7 +268,7 @@ def iter_plot_detected_fiducials(
     save_full_res : bool
         Save annotated full-resolution images via OpenCV.
     scale_factor : float
-        Downscale fraction for the matplotlib grid thumbnails (0.08 = 8 %).
+        Downscale fraction for the matplotlib grid thumbnails (0.1 = 10 %).
     grid_cols : int
         Number of columns in the overview grid.
     figsize : tuple
@@ -419,7 +419,7 @@ def iter_plot_detected_fiducials(
         ]
         fig.legend(handles=legend_handles, loc="lower right", fontsize=10)
         plt.tight_layout(pad=0.5)
-        grid_out = os.path.join(output_directory, "overview_grid.png")
+        grid_out = os.path.join(output_directory, "fiducials_overview_grid.png")
         plt.savefig(grid_out, dpi=150, bbox_inches="tight")
         plt.close(fig)
         if verbose:
