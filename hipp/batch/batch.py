@@ -510,13 +510,23 @@ def iter_detect_fiducials(
     images = sorted(
         glob.glob(os.path.join(image_files_directory, "*" + image_files_extension))
     )
+
+    print(f"\n{'=' * 70}")
+    print("[iter_detect_fiducials] Starting fiducial detection")
+    print(f"  Images directory: {image_files_directory}")
+    print(f"  Found {len(images)} images with extension '{image_files_extension}'")
+    print(f"  Template file: {template_file}")
+    if template_high_res_zoomed_file:
+        print(f"  High-res template: {template_high_res_zoomed_file}")
+
     template_array = cv2.imread(template_file, cv2.IMREAD_GRAYSCALE)
     fiducial_locations = []
     intersection_angles = []
     principal_points = []
     quality_scores = []
 
-    for image_file in images:
+    for idx, image_file in enumerate(images, 1):
+        print(f"  [{idx}/{len(images)}] Processing: {os.path.basename(image_file)}")
         image_array = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
 
         # Subset image array into window slices to speed up template matching
@@ -539,6 +549,7 @@ def iter_detect_fiducials(
 
         # Detect fiducial in each window
         matches, qs = hipp.core.detect_fiducials(slices, template_array, windows)
+        print(f"        → Coarse detection: {len(matches)} fiducials detected")
 
         if midside_fiducials:
             labels = ["midside_left", "midside_top", "midside_right", "midside_bottom"]
@@ -570,6 +581,9 @@ def iter_detect_fiducials(
                 qc=qc,
             )
         )
+        print(
+            f"        → Subpixel refinement: {len(subpixel_fiducial_locations)} fiducials refined"
+        )
 
         fiducial_locations.append(subpixel_fiducial_locations)
         quality_scores.append(subpixel_quality_scores)
@@ -589,6 +603,13 @@ def iter_detect_fiducials(
 
     if center_fiducial:
         df = pd.concat([images_df, fiducial_locations_df, quality_scores_df], axis=1)
+
+    print(f"\n{'=' * 70}")
+    print("[iter_detect_fiducials] Detection complete")
+    print(f"  Total images processed: {len(images)}")
+    print(f"  Output DataFrame shape: {df.shape}")
+    print(f"  Columns: {list(df.columns)}")
+    print(f"{'=' * 70}\n")
 
     return df
 
