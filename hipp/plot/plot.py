@@ -1,11 +1,13 @@
-import multiprocessing
 import os
 import pathlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import psutil
+from matplotlib.lines import Line2D
 
 import hipp.io
 import hipp.plot
@@ -22,17 +24,24 @@ def iter_plot_proxies(
     buffer_distance=250,
     output_directory="qc/proxy_detection",
     verbose=True,
+    max_workers=None,
 ):
 
     locations_no_buffer = proxy_locations_df.iloc[:, 1:] - buffer_distance
     locations_no_buffer = locations_no_buffer.values.tolist()
     principal_points_no_buffer = np.array(principal_points) - buffer_distance
 
-    pool = multiprocessing.Pool(processes=psutil.cpu_count(logical=False))
-    for i in zip(images, locations_no_buffer, principal_points_no_buffer):
-        pool.apply_async(hipp.plot.plot_proxies, args=(i, output_directory))
-    pool.close()
-    pool.join()
+    max_workers = max_workers or psutil.cpu_count(logical=False) or 1
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(hipp.plot.plot_proxies, data, output_directory)
+            for data in zip(
+                images, locations_no_buffer, principal_points_no_buffer, strict=True
+            )
+        ]
+        for future in as_completed(futures):
+            future.result()
 
 
 def plot_histogram(image_array, figsize=(10, 5)):
@@ -86,54 +95,90 @@ def plot_images(
         plt.savefig(output_file_name)
 
 
-def plot_restitution_qc(qc_df):
+def plot_restitution_qc(qc_df, output_directory="qc/restitution/"):
 
-    output_directory = "qc/restitution/"
     print("Image restitution qc plots in " + output_directory)
-    p = pathlib.Path(output_directory)
-    p.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(output_directory).mkdir(parents=True, exist_ok=True)
 
-    y_labels = ["mm", "mm", "degree", "degree"]
+    n_images = len(qc_df)
+    x = np.arange(n_images)
+    image_labels = qc_df.index.tolist()  # truncated names set by caller
 
-    titles = [
-        "Coordinates RMSE",
-        "Coordinates distance to Principal Point RMSE",
-        "Midside fiducial intersection angle at Principal Point difference",
-        "Corner fiducial intersection angle at Principal Point difference",
-    ]
+    # ── Save index → image name mapping for reference ─────────────────────────
+    pd.DataFrame({"index": x, "image": image_labels}).to_csv(
+        os.path.join(output_directory, "image_index_map.csv"), index=False
+    )
 
-    legend_labels = [
-        "before transform",
-        "after transform",
-        "before transform",
-        "after transform",
-        "before transform",
-        "after transform",
-        "before transform",
-        "after transform",
-    ]
+    # ── Match before/after column pairs by name ───────────────────────────────
+    before_cols = [c for c in qc_df.columns if c.endswith("_before_tform")]
+    pairs = []
+    for bc in before_cols:
+        ac = bc.replace("_before_tform", "_after_tform")
+        if ac in qc_df.columns:
+            pairs.append((bc, ac))
 
-    output_names = [
-        "coordinates_rmse",
-        "coordinates_pp_dist_rmse",
-        "midside_angle_diff",
-        "corner_angle_diff",
-    ]
+    titles = {
+        "coordinates_rmse": ("Coordinates RMSE", "mm"),
+        "coordinates_pp_dist_rmse": (
+            "Coordinates distance to Principal Point RMSE",
+            "mm",
+        ),
+        "midside_angle_diff": (
+            "Midside fiducial intersection angle difference",
+            "degree",
+        ),
+        "corner_angle_diff": (
+            "Corner fiducial intersection angle difference",
+            "degree",
+        ),
+    }
 
-    for i in np.arange(1, 5):
-        fig, ax = plt.subplots(figsize=(12, 5))
-        key1 = qc_df.iloc[:, i].name
-        key2 = qc_df.iloc[:, i + 4].name
-        qc_df[[key1, key2]].plot(ax=ax)
-        ax.legend((legend_labels.pop(0), legend_labels.pop(0)))
-        ax.xaxis.set_tick_params(rotation=90)
-        ax.set_xlabel("")
-        ax.set_ylabel(y_labels.pop(0))
-        ax.set_title(titles.pop(0))
+    # Figure width: enough so labels don't overlap (min 12, ~0.5 per image)
+    fig_width = max(12, n_images * 0.5)
 
-        out = os.path.join(output_directory, output_names.pop(0) + ".png")
-        plt.savefig(out)
-        # plt.close()
+    for before_col, after_col in pairs:
+        # derive metric key from column name
+        metric = before_col.replace("_before_tform", "")
+        title, y_label = titles.get(metric, (metric, ""))
+
+        fig, ax = plt.subplots(figsize=(fig_width, 5))
+        ax.plot(
+            x,
+            qc_df[before_col].values,
+            marker="o",
+            markersize=4,
+            label="before transform",
+        )
+        ax.plot(
+            x,
+            qc_df[after_col].values,
+            marker="o",
+            markersize=4,
+            label="after transform",
+        )
+
+        # ── X-axis labels ──────────────────────────────────────────────────────
+        if n_images <= 40:
+            # Show truncated name for every image, rotated
+            ax.set_xticks(x)
+            fontsize = max(5, 9 - n_images // 8)
+            ax.set_xticklabels(image_labels, rotation=90, fontsize=fontsize)
+        else:
+            # Too many images: show integer index; a stride of ~20 tick marks
+            step = max(1, n_images // 20)
+            ax.set_xticks(x[::step])
+            ax.set_xticklabels(x[::step])
+            ax.set_xlabel("Image index  (see image_index_map.csv)")
+
+        ax.legend()
+        ax.set_ylabel(y_label)
+        ax.set_title(title)
+        ax.grid(axis="y", linestyle="--", alpha=0.4)
+        plt.tight_layout()
+
+        out = os.path.join(output_directory, metric + ".png")
+        plt.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
 
 
 def plot_proxies(data, output_directory=None):
@@ -222,6 +267,72 @@ def _coords_from_row(row, df_columns, skip_col):
     return coords
 
 
+def _draw_full_res_single(args):
+    """
+    Worker: draw fiducials on one full-resolution image and save it.
+    Returns (idx, name+ext, out_path) on success or (idx, name+ext, error_msg) on failure.
+    """
+    image_file, coords, full_res_dir, marker_radius, draw_crosshair = args
+    _, name, ext = hipp.io.split_file(image_file)
+    img = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return (name + ext, None, f"WARNING: cannot read {image_file}")
+
+    canvas = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    thickness = max(2, marker_radius // 6)
+    crosshair_len = marker_radius * 3
+
+    for label, (y, x) in coords.items():
+        cx, cy = int(round(x)), int(round(y))
+        color = _color_for_label(label, bgr=True)
+        cv2.circle(canvas, (cx, cy), marker_radius, color, thickness)
+        if draw_crosshair:
+            cv2.line(
+                canvas,
+                (cx - crosshair_len, cy),
+                (cx + crosshair_len, cy),
+                color,
+                max(1, thickness // 2),
+            )
+            cv2.line(
+                canvas,
+                (cx, cy - crosshair_len),
+                (cx, cy + crosshair_len),
+                color,
+                max(1, thickness // 2),
+            )
+        cv2.putText(
+            canvas,
+            label,
+            (cx + marker_radius + 4, cy - 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    out_path = os.path.join(full_res_dir, name + "_fiducials" + ext)
+    cv2.imwrite(out_path, canvas)
+    return (name + ext, out_path, None)
+
+
+def _load_thumbnail(args):
+    """
+    Worker: read one image, downscale it, and return (idx, thumb, coords).
+    Returns None for the thumb on read failure.
+    """
+    idx, image_file, coords, scale_factor = args
+    img = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return (idx, None, coords)
+    h, w = img.shape
+    nh = max(1, int(h * scale_factor))
+    nw = max(1, int(w * scale_factor))
+    thumb = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    return (idx, thumb, coords)
+
+
 def iter_plot_detected_fiducials(
     df_detected,
     image_file_name_column="fileName",
@@ -234,6 +345,7 @@ def iter_plot_detected_fiducials(
     figsize=(20, 20),
     save_grid=True,
     verbose=True,
+    n_workers=None,
 ):
     """
     Visualise detected fiducial markers on images.
@@ -277,7 +389,12 @@ def iter_plot_detected_fiducials(
         Save the matplotlib overview grid.
     verbose : bool
         Print progress to stdout.
+    n_workers : int
+        Number of threads for parallel I/O (full-res writing and thumbnail loading). Defaults to the number of physical CPU cores.
     """
+    if n_workers is None:
+        n_workers = psutil.cpu_count(logical=False) or 1
+
     p = pathlib.Path(output_directory)
     p.mkdir(parents=True, exist_ok=True)
 
@@ -289,70 +406,37 @@ def iter_plot_detected_fiducials(
     n = len(df_detected)
     grid_rows = int(np.ceil(n / grid_cols))
 
+    # Pre-build per-row data once (avoid repeated iterrows inside workers)
+    rows_data = [
+        (
+            str(row[image_file_name_column]),
+            _coords_from_row(row, df_cols, image_file_name_column),
+        )
+        for _, row in df_detected.iterrows()
+    ]
+
+    # ── Matplotlib overview grid — thumbnails loaded in parallel ──────────────
     if save_grid:
+        thumb_args = [
+            (idx, image_file, coords, scale_factor)
+            for idx, (image_file, coords) in enumerate(rows_data)
+        ]
+
+        # Load / downscale all thumbnails concurrently; collect in index order
+        thumbnails: dict[int, tuple] = {}
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            for idx, thumb, coords in executor.map(_load_thumbnail, thumb_args):
+                thumbnails[idx] = (thumb, coords)
+
         fig, axes = plt.subplots(grid_rows, grid_cols, figsize=figsize)
         axes = np.array(axes).flatten()
 
-    for idx, (_, row) in enumerate(df_detected.iterrows()):
-        image_file = str(row[image_file_name_column])
-        coords = _coords_from_row(row, df_cols, image_file_name_column)
-        _, name, ext = hipp.io.split_file(image_file)
-
-        if verbose:
-            print(f"  [{idx + 1}/{n}] {name}{ext}  —  {len(coords)} fiducials")
-
-        # ── Full-resolution OpenCV output ─────────────────────────────────────
-        if save_full_res:
-            img = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                print(f"  WARNING: cannot read {image_file}")
-            else:
-                canvas = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                thickness = max(2, marker_radius // 6)
-                crosshair_len = marker_radius * 3
-
-                for label, (y, x) in coords.items():
-                    cx, cy = int(round(x)), int(round(y))
-                    color = _color_for_label(label, bgr=True)
-                    cv2.circle(canvas, (cx, cy), marker_radius, color, thickness)
-                    if draw_crosshair:
-                        cv2.line(
-                            canvas,
-                            (cx - crosshair_len, cy),
-                            (cx + crosshair_len, cy),
-                            color,
-                            max(1, thickness // 2),
-                        )
-                        cv2.line(
-                            canvas,
-                            (cx, cy - crosshair_len),
-                            (cx, cy + crosshair_len),
-                            color,
-                            max(1, thickness // 2),
-                        )
-                    cv2.putText(
-                        canvas,
-                        label,
-                        (cx + marker_radius + 4, cy - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0,
-                        color,
-                        2,
-                        cv2.LINE_AA,
-                    )
-
-                out_path = os.path.join(full_res_dir, name + "_fiducials" + ext)
-                cv2.imwrite(out_path, canvas)
-
-        # ── Matplotlib thumbnail ──────────────────────────────────────────────
-        if save_grid:
+        for idx in range(n):
+            image_file, coords = rows_data[idx]
+            thumb, _ = thumbnails[idx]
+            _, name, ext = hipp.io.split_file(image_file)
             ax = axes[idx]
-            img = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
-            if img is not None:
-                h, w = img.shape
-                nh = max(1, int(h * scale_factor))
-                nw = max(1, int(w * scale_factor))
-                thumb = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+            if thumb is not None:
                 ax.imshow(thumb, cmap="gray", origin="upper")
                 for label, (y, x) in coords.items():
                     mpl_color = _color_for_label(label, bgr=False)
@@ -379,11 +463,8 @@ def iter_plot_detected_fiducials(
             ax.set_title(name, fontsize=6, pad=2)
             ax.axis("off")
 
-    if save_grid:
-        for i in range(idx + 1, len(axes)):
+        for i in range(n, len(axes)):
             axes[i].axis("off")
-
-        from matplotlib.lines import Line2D
 
         legend_handles = [
             Line2D(
@@ -424,6 +505,23 @@ def iter_plot_detected_fiducials(
         plt.close(fig)
         if verbose:
             print(f"\nOverview grid  → {grid_out}")
+
+    # ── Full-resolution OpenCV output — parallel ──────────────────────────────
+    if save_full_res:
+        full_res_args = [
+            (image_file, coords, full_res_dir, marker_radius, draw_crosshair)
+            for image_file, coords in rows_data
+        ]
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = list(
+                executor.submit(_draw_full_res_single, a) for a in full_res_args
+            )
+            for completed, future in enumerate(as_completed(futures), 1):
+                name_ext, out_path, err = future.result()
+                if err:
+                    print(f"  [{completed}/{n}] {err}")
+                elif verbose:
+                    print(f"  [{completed}/{n}] {name_ext}  →  {out_path}")
 
     if save_full_res and verbose:
         print(f"Full-res images → {full_res_dir}/")
