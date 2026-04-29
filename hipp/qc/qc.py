@@ -1,8 +1,9 @@
 from collections.abc import Iterable
+
 import numpy as np
 
-import hipp.qc
 import hipp.math
+import hipp.qc
 
 
 def compute_angle_diff(coordinates, coordinates_true):
