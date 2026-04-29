@@ -1,8 +1,8 @@
 import concurrent
 import os
 import pathlib
-import shutil
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
 import matplotlib.pyplot as plt
@@ -26,7 +26,7 @@ Library with core image pre-processing functions.
 
 
 def compute_principal_point(
-    subpixel_fiducial_locations, subpixel_quality_scores, median_scores
+    subpixel_fiducial_locations, subpixel_quality_scores, median_scores, threshold=0.01
 ):
 
     principal_point_estimates = []
@@ -36,13 +36,13 @@ def compute_principal_point(
     A0_median_score, B0_median_score, A1_median_score, B1_median_score = median_scores
 
     principal_point_A = hipp.core.eval_and_compute_principal_point(
-        A0, A0_score, A0_median_score, A1, A1_score, A1_median_score
+        A0, A0_score, A0_median_score, A1, A1_score, A1_median_score, threshold
     )
     if principal_point_A:
         principal_point_estimates.append(principal_point_A)
 
     principal_point_B = hipp.core.eval_and_compute_principal_point(
-        B0, B0_score, B0_median_score, B1, B1_score, B1_median_score
+        B0, B0_score, B0_median_score, B1, B1_score, B1_median_score, threshold
     )
     if principal_point_B:
         principal_point_estimates.append(principal_point_B)
@@ -56,7 +56,7 @@ def compute_principal_point(
         return principal_point
 
 
-def compute_principal_points(fiducial_locations_df, quality_scores_df):
+def compute_principal_points(fiducial_locations_df, quality_scores_df, threshold=0.01):
 
     median_scores = []
     for i in np.arange(0, 4):
@@ -69,7 +69,10 @@ def compute_principal_points(fiducial_locations_df, quality_scores_df):
         subpixel_quality_scores = quality_scores_df.iloc[i].values
 
         principal_point = hipp.core.compute_principal_point(
-            subpixel_fiducial_locations, subpixel_quality_scores, median_scores
+            subpixel_fiducial_locations,
+            subpixel_quality_scores,
+            median_scores,
+            threshold,
         )
         principal_points.append([principal_point])
 
@@ -600,6 +603,7 @@ def detect_high_res_fiducial(
     template_high_res_zoomed_file,
     distance_from_loc=200,
     qc=True,
+    qc_directory="qc/fiducial_detection",
 ):
 
     fiducial_crop_high_res_array = cv2.imread(
@@ -609,12 +613,15 @@ def detect_high_res_fiducial(
         template_high_res_zoomed_file, cv2.IMREAD_GRAYSCALE
     )
 
+    if fiducial_crop_high_res_array is None or template_high_res_zoomed_array is None:
+        raise ValueError("Failed to load image files")
+
     match_location, quality_score = hipp.core.match_template(
         fiducial_crop_high_res_array, template_high_res_zoomed_array
     )
 
-    if qc == True:
-        output_directory = "qc/fiducial_detection/"
+    if qc:
+        output_directory = qc_directory
         p = pathlib.Path(output_directory)
         p.mkdir(parents=True, exist_ok=True)
 
@@ -650,53 +657,54 @@ def detect_subpixel_fiducial_coordinates(
     labels=["midside_left", "midside_top", "midside_right", "midside_bottom"],
     distance_from_loc=200,
     factor=8,
-    cleanup=True,
     qc=True,
+    qc_directory="qc/fiducial_detection",
 ):
 
-    output_directory = "tmp/fiducial_crop"
-    p = pathlib.Path(output_directory)
-    p.mkdir(parents=True, exist_ok=True)
+    import tempfile
 
     subpixel_fiducial_locations = []
     quality_scores = []
 
-    for index, match_location in enumerate(matches):
-        cropped_fiducial_file = hipp.core.crop_fiducial(
-            image_file,
-            image_array,
-            match_location,
-            label=labels[index],
-            distance_from_loc=distance_from_loc,
-            output_directory="tmp/fiducial_crop",
-        )
+    # Create a unique temporary directory for this worker process
+    # Automatically cleaned up when exiting the context
+    with tempfile.TemporaryDirectory(prefix="fiducial_crop_") as output_directory:
+        for index, match_location in enumerate(matches):
+            cropped_fiducial_file = hipp.core.crop_fiducial(
+                image_file,
+                image_array,
+                match_location,
+                label=labels[index],
+                distance_from_loc=distance_from_loc,
+                output_directory=output_directory,
+            )
 
-        fiducial_crop_high_res_file = hipp.utils.enhance_geotif_resolution(
-            cropped_fiducial_file, factor=factor
-        )
+            fiducial_crop_high_res_file = hipp.utils.enhance_geotif_resolution(
+                cropped_fiducial_file, factor=factor
+            )
 
-        match_location_high_res, quality_score = hipp.core.detect_high_res_fiducial(
-            fiducial_crop_high_res_file,
-            template_high_res_zoomed_file,
-            distance_from_loc=distance_from_loc,
-            qc=qc,
-        )
+            match_location_high_res, quality_score = hipp.core.detect_high_res_fiducial(
+                fiducial_crop_high_res_file,
+                template_high_res_zoomed_file,
+                distance_from_loc=distance_from_loc,
+                qc=qc,
+            )
 
-        template_hr = cv2.imread(template_high_res_zoomed_file, cv2.IMREAD_GRAYSCALE)
-        half_h = template_hr.shape[0] // 2
-        half_w = template_hr.shape[1] // 2
-        y, x = (
-            (match_location_high_res[0] + half_h) / factor,
-            (match_location_high_res[1] + half_w) / factor,
-        )
-        subpixel_fiducial_location = y + match_location[0], x + match_location[1]
+            template_hr = cv2.imread(
+                template_high_res_zoomed_file, cv2.IMREAD_GRAYSCALE
+            )
+            half_h = template_hr.shape[0] // 2
+            half_w = template_hr.shape[1] // 2
+            y, x = (
+                (match_location_high_res[0] + half_h) / factor,
+                (match_location_high_res[1] + half_w) / factor,
+            )
+            subpixel_fiducial_location = y + match_location[0], x + match_location[1]
 
-        subpixel_fiducial_locations.append(subpixel_fiducial_location)
-        quality_scores.append(quality_score)
+            subpixel_fiducial_locations.append(subpixel_fiducial_location)
+            quality_scores.append(quality_score)
 
-    if cleanup == True:
-        shutil.rmtree("tmp/")
-
+    # Cleanup happens automatically when exiting the 'with' block
     return subpixel_fiducial_locations, quality_scores
 
 
@@ -704,8 +712,7 @@ def eval_and_compute_principal_point(
     P1, P1_score, P1_median_score, P2, P2_score, P2_median_score, threshold=0.01
 ):
     """
-    Evaluates fiducial point detection score and computes principal point estimates
-    as midpoint between diametrically opposed fiducial markers.
+    Evaluates fiducial point detection score and computes principal point estimates as midpoint between diametrically opposed fiducial markers.
     """
 
     if (
@@ -744,6 +751,7 @@ def iter_crop_image_from_file(
     stretch_histogram=True,
     clahe_enhancement=True,
     verbose=True,
+    max_workers=None,
 ):
 
     print("Cropping images...")
@@ -751,10 +759,10 @@ def iter_crop_image_from_file(
     p = pathlib.Path(output_directory)
     p.mkdir(parents=True, exist_ok=True)
 
+    max_workers = max_workers or psutil.cpu_count(logical=True) - 1
+
     with tqdm(total=len(images)) as pbar:
-        pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=psutil.cpu_count(logical=True) - 1
-        )
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
         future = {
             pool.submit(
@@ -783,22 +791,21 @@ def iter_detect_fiducial_proxies(
     if max_workers is None:
         max_workers = psutil.cpu_count(logical=True) - 1
 
+    results = []
     with tqdm(total=len(images)) as pbar:
-        pool = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
-        future = {
-            pool.submit(
-                hipp.core.detect_fiducial_proxies,
-                image_file,
-                templates,
-                buffer_distance=buffer_distance,
-            ): image_file
-            for image_file in images
-        }
-        results = []
-        for f in concurrent.futures.as_completed(future):
-            r = f.result()
-            results.append(r)
-            pbar.update(1)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future = {
+                pool.submit(
+                    hipp.core.detect_fiducial_proxies,
+                    image_file,
+                    templates,
+                    buffer_distance=buffer_distance,
+                ): image_file
+                for image_file in images
+            }
+            for f in as_completed(future):
+                results.append(f.result())
+                pbar.update(1)
     df = (
         pd.DataFrame(results, columns=["match_locations", "scores", "file_names"])
         .sort_values(by=["file_names"])
