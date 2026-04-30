@@ -654,7 +654,7 @@ def detect_subpixel_fiducial_coordinates(
     image_array,
     matches,
     template_high_res_zoomed_file,
-    labels=["midside_left", "midside_top", "midside_right", "midside_bottom"],
+    labels: list | None = None,
     distance_from_loc=200,
     factor=8,
     qc=True,
@@ -662,6 +662,9 @@ def detect_subpixel_fiducial_coordinates(
 ):
 
     import tempfile
+
+    if labels is None:
+        labels = ["midside_left", "midside_top", "midside_right", "midside_bottom"]
 
     subpixel_fiducial_locations = []
     quality_scores = []
@@ -688,6 +691,7 @@ def detect_subpixel_fiducial_coordinates(
                 template_high_res_zoomed_file,
                 distance_from_loc=distance_from_loc,
                 qc=qc,
+                qc_directory=qc_directory,
             )
 
             template_hr = cv2.imread(
@@ -807,7 +811,8 @@ def iter_detect_fiducial_proxies(
                 results.append(f.result())
                 pbar.update(1)
     df = (
-        pd.DataFrame(results, columns=["match_locations", "scores", "file_names"])
+        pd
+        .DataFrame(results, columns=["match_locations", "scores", "file_names"])
         .sort_values(by=["file_names"])
         .reset_index(drop=True)
     )
