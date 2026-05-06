@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import pandas as pd
 from PIL import Image
-from skimage import transform as tf
+from tqdm.auto import tqdm
 
 import hipp.core
 import hipp.image
@@ -114,34 +114,58 @@ def compute_safe_image_square_dim(
     return min_safe_dim, safe_dims
 
 
-def _detect_single_image(args):
-    (
-        image_file,
-        template_file,
-        template_high_res_zoomed_file,
-        midside_fiducials,
-        corner_fiducials,
-        center_fiducial,
-        labels,
-        distance_from_loc,
-        subpx_upsample_factor,
-        qc,
-        qc_directory,
-        idx,
-        total,
-    ) = args
+def _detect_single_image(
+    image_file: str | Path,
+    template_file: str | Path,
+    template_high_res_zoomed_file: str | None,
+    midside_fiducials: bool = False,
+    corner_fiducials: bool = False,
+    center_fiducial: bool = False,
+    labels: list[str] | None = None,
+    distance_from_loc: int = 100,
+    subpx_upsample_factor: int = 8,
+    qc: bool = True,
+    qc_directory: str = "output_data/qc",
+) -> tuple[list[tuple[float, float]], list[float]]:
+    """Detect fiducials for a single image and refine them to subpixel precision.
 
-    print(f"  [{idx}/{total}] Processing: {os.path.basename(image_file)}")
-    image_array = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
+    Loads the image, defines the detection windows based on the requested fiducial
+    geometry, performs coarse template matching, and refines each detected
+    fiducial using the high-resolution template.
+
+    Args:
+        image_file: Path to the image being processed.
+        template_file: Path to the low-resolution template used for coarse matching.
+        template_high_res_zoomed_file: Path to the high-resolution template used
+            for subpixel refinement.
+        midside_fiducials: Whether to detect midside fiducials (left, top, right, bottom).
+        corner_fiducials: Whether to detect corner fiducials (top-left, top-right, bottom-right, bottom-left).
+        center_fiducial: Whether to detect the center fiducial (principal point).
+        labels: Fiducial labels corresponding to the expected match order (e.g. ["midside_left", "midside_top", "midside_right", "midside_bottom"]).
+        distance_from_loc: Crop half-size in pixels used around each coarse match before subpixel refinement (should be large enough to contain the full high-res template).
+        subpx_upsample_factor: Upsampling factor for subpixel refinement (i.e. how many subpixels per original pixel, typically 8 or 16).
+        qc: Whether to write QC outputs during high-resolution matching.
+        qc_directory: Directory where QC outputs are written.
+
+    Returns:
+        A tuple ``(locs, scores)`` where ``locs`` contains the refined fiducial
+        coordinates as ``(y, x)`` pairs and ``scores`` contains the corresponding
+        matching quality scores.
+    """
+    image_array = cv2.imread(str(image_file), cv2.IMREAD_GRAYSCALE)
 
     if midside_fiducials:
         windows = hipp.core.define_midside_windows(image_array)
     elif corner_fiducials:
         windows = hipp.core.define_corner_windows(image_array)
-    else:
+    elif center_fiducial:
         windows = hipp.core.define_center_window(image_array)
+    else:
+        raise ValueError(
+            "At least one fiducial type must be specified: midside, corner, or center."
+        )
 
-    template_array = cv2.imread(template_file, cv2.IMREAD_GRAYSCALE)
+    template_array = cv2.imread(str(template_file), cv2.IMREAD_GRAYSCALE)
     slices = hipp.core.slice_image_frame(image_array, windows)
     matches, _ = hipp.core.detect_fiducials(slices, template_array, windows)
     print(f"        → Coarse detection: {len(matches)} fiducials detected")
@@ -150,7 +174,7 @@ def _detect_single_image(args):
         image_file,
         image_array,
         matches,
-        template_high_res_zoomed_file,
+        str(template_high_res_zoomed_file),
         labels=labels,
         distance_from_loc=distance_from_loc,
         factor=subpx_upsample_factor,
@@ -158,23 +182,24 @@ def _detect_single_image(args):
         qc_directory=qc_directory,
     )
     print(f"        → Subpixel refinement: {len(locs)} fiducials refined")
+
     return locs, scores
 
 
 def iter_detect_fiducials(
-    image_files_directory="input_data/raw_images/",
-    image_file_name_column_name="fileName",
-    image_files_extension=".tif",
-    template_file=None,
-    template_high_res_zoomed_file=None,
-    midside_fiducials=False,
-    corner_fiducials=False,
-    center_fiducial=False,
-    subpx_upsample_factor=8,
-    qc=True,
-    qc_directory="output_data/qc",
-    n_workers=1,
-):
+    image_files_directory: str = "input_data/raw_images/",
+    image_file_name_column_name: str = "fileName",
+    image_files_extension: str = ".tif",
+    template_file: str | None = None,
+    template_high_res_zoomed_file: str | None = None,
+    midside_fiducials: bool = False,
+    corner_fiducials: bool = False,
+    center_fiducial: bool = False,
+    subpx_upsample_factor: int = 8,
+    qc: bool = True,
+    qc_directory: str = "output_data/qc",
+    n_workers: int = 1,
+) -> pd.DataFrame | None:
     """
     Function to iteratively detect fiducial markers in a set of images and return as pandas.DataFrame.
 
@@ -191,7 +216,7 @@ def iter_detect_fiducials(
     print(f"  Images directory: {image_files_directory}")
     print(f"  Found {len(images)} images with extension '{image_files_extension}'")
     print(f"  Template file: {template_file}")
-    if template_high_res_zoomed_file:
+    if template_high_res_zoomed_file is not None:
         print(f"  High-res template: {template_high_res_zoomed_file}")
     print(f"  Workers: {n_workers}")
 
@@ -212,41 +237,68 @@ def iter_detect_fiducials(
         )
         return
 
-    quality_score_labels = [s + "_score" for s in labels]
+    if template_file is None:
+        raise ValueError("template_file must be provided for fiducial detection.")
+    if template_high_res_zoomed_file is None:
+        raise ValueError(
+            "template_high_res_zoomed_file must be provided for fiducial detection."
+        )
+
     template_array = cv2.imread(template_file, cv2.IMREAD_GRAYSCALE)
+    if template_array is None:
+        raise ValueError(f"Could not read template image: {template_file}")
     distance_from_loc = template_array.shape[0]
 
     total = len(images)
-    args_list = [
-        (
-            image_file,
-            template_file,
-            template_high_res_zoomed_file,
-            midside_fiducials,
-            corner_fiducials,
-            center_fiducial,
-            labels,
-            distance_from_loc,
-            subpx_upsample_factor,
-            qc,
-            qc_directory,
-            idx,
-            total,
-        )
-        for idx, image_file in enumerate(images, 1)
+    kwargs_list = [
+        {
+            "image_file": image_file,
+            "template_file": template_file,
+            "template_high_res_zoomed_file": template_high_res_zoomed_file,
+            "midside_fiducials": midside_fiducials,
+            "corner_fiducials": corner_fiducials,
+            "center_fiducial": center_fiducial,
+            "labels": labels,
+            "distance_from_loc": distance_from_loc,
+            "subpx_upsample_factor": subpx_upsample_factor,
+            "qc": qc,
+            "qc_directory": qc_directory,
+        }
+        for image_file in images
     ]
 
     if n_workers > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
-            results = list(executor.map(_detect_single_image, args_list))
+            futures = [
+                executor.submit(_detect_single_image, **kwargs)
+                for kwargs in kwargs_list
+            ]
+            results_by_index = {}
+            future_to_index = {future: index for index, future in enumerate(futures)}
+            for future in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=total,
+                desc="Detecting fiducials",
+            ):
+                index = future_to_index[future]
+                results_by_index[index] = future.result()
+            results = [results_by_index[index] for index in range(total)]
     else:
-        results = [_detect_single_image(a) for a in args_list]
+        results = [
+            _detect_single_image(**kwargs)
+            for kwargs in tqdm(
+                kwargs_list,
+                total=total,
+                desc="Detecting fiducials",
+            )
+        ]
 
     fiducial_locations = [r[0] for r in results]
     quality_scores = [r[1] for r in results]
 
     images_df = pd.DataFrame(images, columns=[image_file_name_column_name])
     fiducial_locations_df = pd.DataFrame(fiducial_locations, columns=labels)
+    quality_score_labels = [s + "_score" for s in labels]
     quality_scores_df = pd.DataFrame(quality_scores, columns=quality_score_labels)
 
     if center_fiducial:
@@ -270,294 +322,6 @@ def iter_detect_fiducials(
     return df
 
 
-def _restitute_single_image(
-    image_file: str,
-    fiducial_coordinates: np.ndarray,
-    principal_point: np.ndarray,
-    fiducial_coordinates_true_mm: "np.ndarray | list | None",
-    transform_coords: bool,
-    transform_image: bool,
-    crop_image: bool,
-    keep_color: bool,
-    qc: bool,
-    interpolation_order: int,
-    image_square_dim: int,
-    output_directory: str,
-    scanning_resolution_mm: float,
-) -> dict:
-    """Process a single image: affine-warp to fiducial targets, crop, and compute QC.
-
-    Derives the affine transform that maps detected fiducial positions to their
-    calibrated true positions in the image, applies it to the image and/or
-    coordinates, crops the result around the transformed principal point, and
-    returns per-image QC metrics and log data.
-
-    The calibration coordinates (mm, y-up, origin at PP) are converted to pixel
-    targets by dividing by ``scanning_resolution_mm``, flipping Y, and adding the
-    detected ``principal_point`` offset — so the affine anchors to the physical
-    image frame rather than an arbitrary pixel origin.
-
-    Args:
-        image_file: Path to the source image file.
-        fiducial_coordinates: Detected fiducial positions in image pixel
-            coordinates, shape ``(N, 2)`` ordered as ``[[x0, y0], ...]``.
-        principal_point: Detected principal point in image pixel coordinates,
-            shape ``(2,)`` as ``[x, y]``.
-        fiducial_coordinates_true_mm: True fiducial positions from the camera
-            calibration in mm, shape ``(N, 2)`` as ``[[x0, y0], ...]``, where x
-            is positive right and y is positive upward with origin at the
-            principal point.  Pass ``None`` to skip affine estimation.
-        transform_coords: If ``True``, apply the affine transform to the
-            fiducial coordinates and principal point.
-        transform_image: If ``True``, apply the affine warp to the image array.
-        crop_image: If ``True``, crop the warped image to a square centred on
-            the transformed principal point.
-        keep_color: If ``True``, read and preserve RGB channels; otherwise
-            convert to grayscale.
-        qc: If ``True``, compute and store QC metrics (RMSE, angle diffs,
-            pixel pitch).
-        interpolation_order: Spline interpolation order for ``tf.warp``
-            (0 = nearest, 1 = bilinear, 3 = bicubic).
-        image_square_dim: Side length of the square output crop in pixels.
-        output_directory: Directory where the output image is written.
-        scanning_resolution_mm: Scanning resolution in mm/px, used to convert
-            calibration mm coordinates to pixel targets.
-
-    Returns:
-        A flat ``dict`` with keys:
-
-        * ``source_image``, ``output_image``
-        * ``principal_point_detected_px``, ``fiducials_detected_px``
-        * ``affine_transform`` (``None`` if not estimated)
-        * ``principal_point_restituted_px``, ``fiducials_restituted_px``
-        * ``principal_point_crop_center_px``, ``crop_bounds_px``
-        * ``fiducials_in_crop_px`` — list of ``[x, y]`` per fiducial in the
-          cropped image (only populated when ``crop_image=True``)
-        * QC metric keys (``NaN`` when not computed)
-    """
-    # Convert calibration mm coordinates to pixel targets anchored at the
-    # detected principal point.  Calibration convention: x right, y up.
-    # Image pixel convention: y down → flip Y before adding the PP offset.
-    fiducial_coordinates_true = None
-    if fiducial_coordinates_true_mm is not None:
-        fid_true_mm = np.array(fiducial_coordinates_true_mm, dtype=float)
-        fid_true_px = fid_true_mm / scanning_resolution_mm
-        fid_true_px[:, 1] *= -1  # y-down image convention
-        fiducial_coordinates_true = fid_true_px + principal_point
-
-    result = {
-        "source_image": image_file,
-        "output_image": None,
-        "principal_point_detected_px": principal_point.tolist(),
-        "fiducials_detected_px": fiducial_coordinates.tolist(),
-        "affine_transform": None,
-        "principal_point_restituted_px": None,
-        "fiducials_restituted_px": None,
-        "principal_point_crop_center_px": None,
-        "crop_bounds_px": None,
-        # QC metrics — NaN means not computed
-        "coordinates_rmse_before_tform_mm": np.nan,
-        "coordinates_pp_dist_rmse_before_tform_mm": np.nan,
-        "midside_angle_diff_before_tform_mm": np.nan,
-        "corner_angle_diff_before_tform": np.nan,
-        "coordinates_rmse_after_tform": np.nan,
-        "coordinates_pp_dist_rmse_after_tform": np.nan,
-        "midside_angle_diff_after_tform": np.nan,
-        "corner_angle_diff_after_tform": np.nan,
-        "pixel_pitch_after_tform_x": np.nan,
-        "pixel_pitch_after_tform_y": np.nan,
-    }
-
-    # track true_mm slices so after-transform block can reuse them
-    midside_coordinates_true_mm = None
-    corner_coordinates_true_mm = None
-
-    # ── QC before transform ───────────────────────────────────────────────────
-    if qc and fiducial_coordinates_true_mm is not None:
-        # detected fiducials in camera mm frame
-        fiducial_coordinates_mm, _ = hipp.qc.convert_coordinates(
-            fiducial_coordinates,
-            principal_point,
-            scanning_resolution_mm=scanning_resolution_mm,
-        )
-        # true fiducials in camera mm frame (equals calibration values by construction)
-        fiducial_coordinates_true_mm_qc, _ = hipp.qc.convert_coordinates(
-            fiducial_coordinates_true,
-            principal_point,
-            scanning_resolution_mm=scanning_resolution_mm,
-        )
-        result["coordinates_rmse_before_tform_mm"] = hipp.qc.compute_coordinate_rmse(
-            fiducial_coordinates_mm, fiducial_coordinates_true_mm_qc
-        )
-        n_fid = len(fiducial_coordinates_mm)
-        if n_fid == 8:
-            midside_coordinates_mm = fiducial_coordinates_mm[:4]
-            midside_coordinates_true_mm = fiducial_coordinates_true_mm_qc[:4]
-            corner_coordinates_mm = fiducial_coordinates_mm[4:]
-            corner_coordinates_true_mm = fiducial_coordinates_true_mm_qc[4:]
-            result["mid    side_angle_diff_before_tform"] = hipp.qc.compute_angle_diff(
-                midside_coordinates_mm, midside_coordinates_true_mm
-            )
-            result["corner_angle_diff_before_tform"] = hipp.qc.compute_angle_diff(
-                corner_coordinates_mm, corner_coordinates_true_mm
-            )
-            result["coordinates_pp_dist_rmse_before_tform_mm"] = (
-                hipp.qc.compute_coordinate_distance_diff_rmse(
-                    midside_coordinates_mm,
-                    midside_coordinates_true_mm,
-                    corner_coordinates_mm,
-                    corner_coordinates_true_mm,
-                )
-            )
-        elif n_fid == 4:
-            midside_coordinates_mm = fiducial_coordinates_mm[:4]
-            midside_coordinates_true_mm = fiducial_coordinates_true_mm_qc[:4]
-            result["midside_angle_diff_before_tform_mm"] = hipp.qc.compute_angle_diff(
-                midside_coordinates_mm, midside_coordinates_true_mm
-            )
-            result["coordinates_pp_dist_rmse_before_tform_mm"] = (
-                hipp.qc.compute_coordinate_distance_diff_rmse(
-                    midside_coordinates_mm, midside_coordinates_true_mm, None, None
-                )
-            )
-
-    # ── Load image ────────────────────────────────────────────────────────────
-    image_array = None
-    if transform_image or crop_image:
-        flags = cv2.IMREAD_COLOR if keep_color else cv2.IMREAD_GRAYSCALE
-        image_array = cv2.imread(image_file, flags)
-
-    # ── Affine transform ──────────────────────────────────────────────────────
-    fiducial_coordinates_tform = fiducial_coordinates.copy()
-    if (transform_image or transform_coords) and fiducial_coordinates_true is not None:
-        # Keep only rows where both detected and true coords are valid
-        valid = ~(
-            np.isnan(fiducial_coordinates).any(axis=1)
-            | np.isnan(fiducial_coordinates_true).any(axis=1)
-        )
-        fid_valid = fiducial_coordinates[valid]
-        fid_true_valid = fiducial_coordinates_true[valid]
-
-        if len(fid_valid) >= 3:
-            # tform = tf.AffineTransform() # Deprecated approach
-            # tform.estimate(fid_valid, fid_true_valid)
-            tform = tf.estimate_transform("affine", fid_valid, fid_true_valid)
-
-            fiducial_coordinates_tform = tform(fiducial_coordinates)
-            principal_point = tform(principal_point)[0]
-
-            result["pixel_pitch_after_tform_x"] = float(
-                np.round(tform.scale[1], 4) * scanning_resolution_mm
-            )
-            result["pixel_pitch_after_tform_y"] = float(
-                np.round(tform.scale[0], 4) * scanning_resolution_mm
-            )
-            result["affine_transform"] = {
-                "matrix_3x3": tform.params.tolist(),
-                "translation_px": list(tform.translation),
-                "rotation_rad": float(tform.rotation),
-                "scale": list(tform.scale),
-                "shear_rad": float(tform.shear),
-            }
-            result["principal_point_restituted_px"] = principal_point.tolist()
-            result["fiducials_restituted_px"] = fiducial_coordinates_tform.tolist()
-
-            if transform_image and image_array is not None:
-                A = np.linalg.inv(tform.params)
-                image_array = (
-                    tf.warp(
-                        image_array,
-                        A,
-                        output_shape=image_array.shape,
-                        order=interpolation_order,
-                    )
-                    * 255
-                ).astype(np.uint8)
-
-            # ── QC after transform ────────────────────────────────────────────
-            if qc and fiducial_coordinates_true_mm is not None:
-                fiducial_coordinates_tform_mm, _ = hipp.qc.convert_coordinates(
-                    fiducial_coordinates_tform,
-                    principal_point,
-                    scanning_resolution_mm=scanning_resolution_mm,
-                )
-                result["coordinates_rmse_after_tform"] = (
-                    hipp.qc.compute_coordinate_rmse(
-                        fiducial_coordinates_tform_mm, fiducial_coordinates_true_mm
-                    )
-                )
-                n_fid = len(fiducial_coordinates_tform_mm)
-                if n_fid == 8:
-                    midside_tform_mm = fiducial_coordinates_tform_mm[:4]
-                    corner_tform_mm = fiducial_coordinates_tform_mm[4:]
-                    result["midside_angle_diff_after_tform"] = (
-                        hipp.qc.compute_angle_diff(
-                            midside_tform_mm, midside_coordinates_true_mm
-                        )
-                    )
-                    result["corner_angle_diff_after_tform"] = (
-                        hipp.qc.compute_angle_diff(
-                            corner_tform_mm, corner_coordinates_true_mm
-                        )
-                    )
-                    result["coordinates_pp_dist_rmse_after_tform"] = (
-                        hipp.qc.compute_coordinate_distance_diff_rmse(
-                            midside_tform_mm,
-                            midside_coordinates_true_mm,
-                            corner_tform_mm,
-                            corner_coordinates_true_mm,
-                        )
-                    )
-                elif n_fid == 4:
-                    midside_tform_mm = fiducial_coordinates_tform_mm[:4]
-                    result["midside_angle_diff_after_tform"] = (
-                        hipp.qc.compute_angle_diff(
-                            midside_tform_mm, midside_coordinates_true_mm
-                        )
-                    )
-                    result["coordinates_pp_dist_rmse_after_tform"] = (
-                        hipp.qc.compute_coordinate_distance_diff_rmse(
-                            midside_tform_mm, midside_coordinates_true_mm, None, None
-                        )
-                    )
-
-    # ── Crop and write ────────────────────────────────────────────────────────
-    if crop_image and image_array is not None:
-        principal_point_int = np.array([int(round(v)) for v in principal_point])
-        half = int(round(image_square_dim / 2))
-        pp_x, pp_y = int(principal_point_int[0]), int(principal_point_int[1])
-        result["principal_point_crop_center_px"] = [pp_x, pp_y]
-        result["crop_bounds_px"] = {
-            "x_left": pp_x - half,
-            "x_right": pp_x + half,
-            "y_top": pp_y - half,
-            "y_bottom": pp_y + half,
-        }
-        # Fiducial positions in the cropped image: subtract the crop offset
-        # (crop_center - half) from the warped coordinates.
-        result["fiducials_in_crop_px"] = [
-            [fid[0] - (pp_x - half), fid[1] - (pp_y - half)]
-            for fid in fiducial_coordinates_tform
-        ]
-        image_array = hipp.image.crop_about_point(
-            image_array,
-            principal_point_int[::-1],  # crop_about_point expects y, x
-            image_square_dim=image_square_dim,
-        )
-        _, basename, extension = hipp.io.split_file(image_file)
-        out = os.path.join(output_directory, basename + extension)
-        cv2.imwrite(out, image_array)
-        result["output_image"] = out
-        print(out)
-
-    elif transform_image and image_array is not None:
-        _, basename, extension = hipp.io.split_file(image_file)
-        out = os.path.join(output_directory, basename + extension)
-        cv2.imwrite(out, image_array)
-        result["output_image"] = out
-
-    return result
-
 
 def image_restitution(
     df_detected,
@@ -574,12 +338,12 @@ def image_restitution(
     keep_color=False,
     qc_directory="input_data/restitution_qc",
     n_workers=1,
+    geometric_outlier_threshold_px=200.0,
 ):
-    """
-    Computes affine transformation between detected coordinates and true coordinates,
+    """Computes affine transformation between detected coordinates and true coordinates,
     then transforms image array.
 
-    Parameters
+            results_by_index = {}
     ----------
     df_detected : pd.DataFrame
         DataFrame with detected fiducial coordinates and image file names.
@@ -589,7 +353,6 @@ def image_restitution(
         Column name containing image file paths.
     scanning_resolution_mm : float, default=0.02
         Scanning resolution in mm/px.
-    transform_coords : bool, default=True
         Whether to transform coordinates using affine transformation.
     transform_image : bool, default=True
         Whether to transform the image array.
@@ -666,6 +429,7 @@ def image_restitution(
                 image_square_dim=image_square_dim,
                 output_directory=output_directory,
                 scanning_resolution_mm=scanning_resolution_mm,
+                geometric_outlier_threshold_px=geometric_outlier_threshold_px,
             )
         )
 
@@ -676,11 +440,12 @@ def image_restitution(
     if n_workers > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = [
-                executor.submit(_restitute_single_image, **kw) for kw in kwargs_list
+                executor.submit(hipp.core.restitute_single_image, **kw)
+                for kw in kwargs_list
             ]
             results = [f.result() for f in futures]
     else:
-        results = [_restitute_single_image(**kw) for kw in kwargs_list]
+        results = [hipp.core.restitute_single_image(**kw) for kw in kwargs_list]
 
     if not qc:
         # Build and return the fiducial crop positions even without full QC.
@@ -710,6 +475,17 @@ def image_restitution(
         image_file_name_column_name,
         df_detected[image_file_name_column_name].values,
     )
+
+    # Keep backward-compatible mm-suffixed columns in CSV while exposing
+    # canonical *_before_tform names expected by plot_restitution_qc.
+    qc_df["coordinates_rmse_before_tform"] = qc_df["coordinates_rmse_before_tform_mm"]
+    qc_df["coordinates_pp_dist_rmse_before_tform"] = qc_df[
+        "coordinates_pp_dist_rmse_before_tform_mm"
+    ]
+    qc_df["midside_angle_diff_before_tform"] = qc_df[
+        "midside_angle_diff_before_tform_mm"
+    ]
+
     qc_df.index = qc_df[image_file_name_column_name].str[-12:-4]
 
     # ── Save QC CSV ───────────────────────────────────────────────────────────
