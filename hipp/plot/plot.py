@@ -1,3 +1,4 @@
+import ast
 import os
 import pathlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -256,6 +257,18 @@ def _coords_from_row(row, df_columns, skip_col):
             val = row.get(col)
             if val is None:
                 continue
+            if isinstance(val, str):
+                txt = val.strip()
+                if txt:
+                    try:
+                        parsed = ast.literal_eval(txt)
+                        if (
+                            isinstance(parsed, (tuple, list, np.ndarray))
+                            and len(parsed) == 2
+                        ):
+                            val = parsed
+                    except (SyntaxError, ValueError):
+                        continue
             if isinstance(val, (tuple, list, np.ndarray)) and len(val) == 2:
                 try:
                     y, x = float(val[0]), float(val[1])
